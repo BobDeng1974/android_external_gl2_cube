@@ -2,7 +2,8 @@ LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES:= \
-	gl2_cube.cpp
+	gl2_cube.cpp \
+  Matrix.cpp
 
 LOCAL_SHARED_LIBRARIES := \
     libcutils \

@@ -26,6 +26,9 @@
 #include <sys/mman.h>
 #include <linux/fb.h> 
 
+#include "Cube.h"
+#include "Matrix.h"
+
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -38,33 +41,9 @@
 
 using namespace android;
 
-/* Simple triangle. */
-const float triangleVertices[] =
-{
-     0.0f,  0.5f, 0.0f,
-    -0.5f, -0.5f, 0.0f,
-     0.5f, -0.5f, 0.0f,
-};
-
-/* Per corner colors for the triangle (Red, Green, Green). */
-const float triangleColors[] =
-{
-    1.0, 0.0, 0.0, 1.0,
-    0.0, 1.0, 0.0, 1.0,
-    0.0, 1.0, 0.0, 1.0,
-};
-
 static void printGLString(const char *name, GLenum s) 
 {
-  // fprintf(stderr, "printGLString %s, %d\n", name, s);
   const char *v = (const char *) glGetString(s);
-  // int error = glGetError();
-  // fprintf(stderr, "glGetError() = %d, result of glGetString = %x\n", error,
-  //        (unsigned int) v);
-  // if ((v < (const char*) 0) || (v > (const char*) 0x10000))
-  //    fprintf(stderr, "GL %s = %s\n", name, v);
-  // else
-  //    fprintf(stderr, "GL %s = (null) 0x%08x\n", name, (unsigned int) v);
   fprintf(stderr, "GL %s = %s\n", name, v);
 }
 
@@ -95,19 +74,20 @@ static void checkGlError(const char* op)
   }
 }
 
-static const char gVertexShader[] = "attribute vec4 a_v4Position;\n"
-    "attribute vec4 a_v4FillColor;\n"
-    "varying vec4 v_v4FillColor;\n"
+static const char gVertexShader[] = "attribute vec4 av4position;\n"
+    "attribute vec3 av3colour;\n"
+    "uniform mat4 mvp;\n"
+    "varying vec3 vv3colour;\n"
     "void main() {\n"
-    "  v_v4FillColor = a_v4FillColor;\n"
-    "  gl_Position = a_v4Position;\n"
+    "  vv3colour = av3colour;\n"
+    "  gl_Position = mvp * av4position;\n"
     "}\n";
 
 static const char gFragmentShader[] = "#extension GL_OES_EGL_image_external : require\n"
-    "precision mediump float;\n"
-    "varying vec4 v_v4FillColor;\n"
+    "precision lowp float;\n"
+    "varying vec3 vv3colour;\n"
     "void main() {\n"
-    "  gl_FragColor = v_v4FillColor;\n"
+    "  gl_FragColor = vec4(vv3colour, 1.0);\n"
     "}\n";
 
 GLuint loadShader(GLenum shaderType, const char* pSource) {
@@ -148,16 +128,12 @@ GLuint loadShader(GLenum shaderType, const char* pSource) {
 
 /* Shader variables. */
 GLuint programID;
-GLint  iLocPosition  = -1;
-GLint  iLocFillColor = -1;
+GLint  iLocPosition;
+GLint  iLocColor;
+GLint  iLocMVP;
 
 bool setupGraphics(int w, int h) 
 {
-  glEnable(GL_DEPTH_TEST);
-  checkGlError("glEnable");
-  glDepthFunc(GL_LEQUAL);
-  checkGlError("glDepthFunc");
-
   /* Initialize OpenGL ES. */
   glEnable(GL_BLEND);
   checkGlError("glEnable");
@@ -197,48 +173,79 @@ bool setupGraphics(int w, int h)
   checkGlError("glUseProgram");
 
   /* Positions. */
-  iLocPosition = glGetAttribLocation(programID, "a_v4Position");
-  fprintf(stderr, "glGetAttribLocation(\"a_v4Position\") = %d\n", iLocPosition);
+  iLocPosition = glGetAttribLocation(programID, "av4position");
+  fprintf(stderr, "glGetAttribLocation(\"av4position\") = %d\n", iLocPosition);
 
   /* Fill colors. */
-  iLocFillColor = glGetAttribLocation(programID, "a_v4FillColor");
-  fprintf(stderr, "glGetAttribLocation(\"a_v4FillColor\") = %d\n", iLocFillColor);
+  iLocColor = glGetAttribLocation(programID, "av3colour");
+  fprintf(stderr, "glGetAttribLocation(\"av3colour\") = %d\n", iLocColor);
 
-  glViewport(0, 0, w, h);
-  checkGlError("glViewport");
+  iLocMVP = glGetUniformLocation(programID, "mvp");
+  fprintf(stderr, "glGetUniformLocation(\"mvp\") = %d\n", iLocMVP);
+
+  glEnable(GL_CULL_FACE);
+  glEnable(GL_DEPTH_TEST);
 
   /* Set clear screen color. */
-  glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
   checkGlError("glClearColor");
-  glClearDepthf(1.0f);
-  checkGlError("glClearDepthf");
   return true;
 }
 
 void renderFrame(int w, int h) 
 {
-  glClear( GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT );
-  checkGlError("glClear");
-
   glUseProgram(programID);
   checkGlError("glUseProgram");
 
-  /* Pass the triangle vertex positions to the shader */
-  glVertexAttribPointer(iLocPosition, 3, GL_FLOAT, GL_FALSE, 0, triangleVertices);
-  checkGlError("glVertexAttribPointer");
   glEnableVertexAttribArray(iLocPosition);
   checkGlError("glEnableVertexAttribArray");
+  glEnableVertexAttribArray(iLocColor);
+  checkGlError("glEnableVertexAttribArray");
 
-  if(iLocFillColor != -1)
-  {
-      /* Pass the vertex colours to the shader */
-      glVertexAttribPointer(iLocFillColor, 4, GL_FLOAT, GL_FALSE, 0, triangleColors);
-      checkGlError("glVertexAttribPointer");
-      glEnableVertexAttribArray(iLocFillColor);
-      checkGlError("glEnableVertexAttribArray");
-  }
+  /* Populate attributes for position, color and texture coordinates etc. */
+  glVertexAttribPointer(iLocPosition, 3, GL_FLOAT, GL_FALSE, 0, vertices);
+  checkGlError("glVertexAttribPointer");
+  glVertexAttribPointer(iLocColor, 3, GL_FLOAT, GL_FALSE, 0, colors);
+  checkGlError("glVertexAttribPointer");
 
-  glDrawArrays(GL_TRIANGLES, 0, 3);
+  static float angleX = 0, angleY = 0, angleZ = 0;
+  /*
+   * Do some rotation with Euler angles. It is not a fixed axis as
+   * quaternions would be, but the effect is nice.
+   */
+  Matrix modelView = Matrix::createRotationX(angleX);
+  Matrix rotation = Matrix::createRotationY(angleY);
+
+  modelView = rotation * modelView;
+
+  rotation = Matrix::createRotationZ(angleZ);
+
+  modelView = rotation * modelView;
+
+  /* Pull the camera back from the cube */
+  modelView[14] -= 2.5;
+
+  Matrix perspective = Matrix::matrixPerspective(45.0f, w/(float)h, 0.01f, 100.0f);
+  Matrix modelViewPerspective = perspective * modelView;
+
+  glUniformMatrix4fv(iLocMVP, 1, GL_FALSE, modelViewPerspective.getAsArray());
+  checkGlError("glUniformMatrix4fv");
+
+  /* Update cube's rotation angles for animating. */
+  angleX += 3;
+  angleY += 2;
+  angleZ += 1;
+
+  if(angleX >= 360) angleX -= 360;
+  if(angleX < 0) angleX += 360;
+  if(angleY >= 360) angleY -= 360;
+  if(angleY < 0) angleY += 360;
+  if(angleZ >= 360) angleZ -= 360;
+  if(angleZ < 0) angleZ += 360;
+
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  checkGlError("glClear");
+  glDrawArrays(GL_TRIANGLES, 0, 36);
   checkGlError("glDrawArrays");
 }
 
