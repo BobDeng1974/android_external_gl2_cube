@@ -41,6 +41,16 @@
 
 using namespace android;
 
+static int xioctl( int fd,int request,void * arg ) 
+{ 
+  int r; 
+  do
+  {
+    r = ioctl( fd, request, arg ); 
+  }while( -1 == r && EINTR == errno ); 
+  return r; 
+}
+
 static void printGLString(const char *name, GLenum s) 
 {
   const char *v = (const char *) glGetString(s);
@@ -154,75 +164,125 @@ GLuint loadShader(GLenum shaderType, const char* pSource) {
     return shader;
 }
 
-const int yuvTexWidth = 608;
-const int yuvTexHeight = 480;
-const int yuvTexUsage = GraphicBuffer::USAGE_HW_TEXTURE |
-        GraphicBuffer::USAGE_SW_WRITE_RARELY;
-const int yuvTexFormat = HAL_PIXEL_FORMAT_YV12;
-const int yuvTexOffsetY = 0;
-const bool yuvTexSameUV = false;
-static sp<GraphicBuffer> yuvTexBuffer;
-static GLuint yuvTex;
+const int fbTexWidth    = 640;
+const int fbTexHeight   = 240;
+const int fbTexUsage    = GraphicBuffer::USAGE_HW_TEXTURE |
+                          GraphicBuffer::USAGE_SW_WRITE_RARELY;
+const int fbTexFormat   = HAL_PIXEL_FORMAT_RGB_565;
+static sp<GraphicBuffer> fbTexBuffer;
+static GLuint fbTex;
 
-bool setupYuvTexSurface(EGLDisplay dpy, EGLContext context) 
+int                         fd, 
+                            scrSize;
+struct  fb_var_screeninfo   vInfo;
+struct  fb_fix_screeninfo   fInfo; 
+char*                       buf;
+unsigned char              *pFbBuf;
+unsigned char               color;
+
+void fillFbTexture(EGLDisplay dpy, EGLContext context, bool flag )
 {
-    int blockWidth = yuvTexWidth > 16 ? yuvTexWidth / 16 : 1;
-    int blockHeight = yuvTexHeight > 16 ? yuvTexHeight / 16 : 1;
-    yuvTexBuffer = new GraphicBuffer(yuvTexWidth, yuvTexHeight, yuvTexFormat,
-            yuvTexUsage);
-    int yuvTexStrideY = yuvTexBuffer->getStride();
-    int yuvTexOffsetV = yuvTexStrideY * yuvTexHeight;
-    int yuvTexStrideV = (yuvTexStrideY/2 + 0xf) & ~0xf;
-    int yuvTexOffsetU = yuvTexOffsetV + yuvTexStrideV * yuvTexHeight/2;
-    int yuvTexStrideU = yuvTexStrideV;
-    char* buf = NULL;
-    status_t err = yuvTexBuffer->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, (void**)(&buf));
-    if (err != 0) {
-        fprintf(stderr, "yuvTexBuffer->lock(...) failed: %d\n", err);
-        return false;
-    }
-    for (int x = 0; x < yuvTexWidth; x++) {
-        for (int y = 0; y < yuvTexHeight; y++) {
-            int parityX = (x / blockWidth) & 1;
-            int parityY = (y / blockHeight) & 1;
-            unsigned char intensity = (parityX ^ parityY) ? 63 : 191;
-            buf[yuvTexOffsetY + (y * yuvTexStrideY) + x] = intensity;
-            if (x < yuvTexWidth / 2 && y < yuvTexHeight / 2) {
-                buf[yuvTexOffsetU + (y * yuvTexStrideU) + x] = intensity;
-                if (yuvTexSameUV) {
-                    buf[yuvTexOffsetV + (y * yuvTexStrideV) + x] = intensity;
-                } else if (x < yuvTexWidth / 4 && y < yuvTexHeight / 4) {
-                    buf[yuvTexOffsetV + (y*2 * yuvTexStrideV) + x*2 + 0] =
-                    buf[yuvTexOffsetV + (y*2 * yuvTexStrideV) + x*2 + 1] =
-                    buf[yuvTexOffsetV + ((y*2+1) * yuvTexStrideV) + x*2 + 0] =
-                    buf[yuvTexOffsetV + ((y*2+1) * yuvTexStrideV) + x*2 + 1] = intensity;
-                }
-            }
-        }
-    }
+  status_t err = fbTexBuffer->lock( GRALLOC_USAGE_SW_WRITE_OFTEN, (void**)(&buf) );
+  if (err != 0) 
+  {
+    fprintf( stderr, "fbTexBuffer->lock(...) failed: %d\n", err );
+    return;
+  }
 
-    err = yuvTexBuffer->unlock();
-    if (err != 0) {
-        fprintf(stderr, "yuvTexBuffer->unlock() failed: %d\n", err);
-        return false;
-    }
+  // Get variable screen information. 
+  if( -1 == xioctl( fd, FBIOGET_VSCREENINFO, &vInfo ) ) 
+  { 
+    fprintf( stderr, "Error reading variable information.\n" ); 
+  }
+  memcpy( buf,
+          pFbBuf + ( vInfo.yoffset * vInfo.xres * vInfo.bits_per_pixel / 8 ),
+          vInfo.xres * vInfo.yres * vInfo.bits_per_pixel / 8);
 
-    EGLClientBuffer clientBuffer = (EGLClientBuffer)yuvTexBuffer->getNativeBuffer();
-    EGLImageKHR img = eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
-            clientBuffer, 0);
-    checkEglError("eglCreateImageKHR");
-    if (img == EGL_NO_IMAGE_KHR) {
-        return false;
-    }
+  err = fbTexBuffer->unlock();
+  if (err != 0) 
+  {
+    fprintf( stderr, "fbTexBuffer->unlock() failed: %d\n", err );
+    return;
+  }
 
-    glGenTextures(1, &yuvTex);
-    checkGlError("glGenTextures");
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, yuvTex);
-    checkGlError("glBindTexture");
-    glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)img);
-    checkGlError("glEGLImageTargetTexture2DOES");
+  if( flag )
+  {
+  EGLClientBuffer clientBuffer = (EGLClientBuffer)fbTexBuffer->getNativeBuffer();
+  EGLImageKHR     img = eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+                                          clientBuffer, 0);
+  checkEglError("eglCreateImageKHR");
+  if (img == EGL_NO_IMAGE_KHR) 
+  {
+    return;
+  }
 
-    return true;
+  glGenTextures(1, &fbTex);
+  checkGlError("glGenTextures");
+  glBindTexture(GL_TEXTURE_EXTERNAL_OES, fbTex);
+  checkGlError("glBindTexture");
+  glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)img);
+  checkGlError("glEGLImageTargetTexture2DOES");
+
+  eglDestroyImageKHR(dpy, img);
+  checkGlError("eglDestroyImageKHR");
+  }
+}
+
+void openFbDevice(void)
+{
+  fd = open( "/dev/graphics/fb0", O_RDONLY );
+  if( fd < 0 ) 
+  {
+    fprintf( stderr, "could not open %s, %s\n", "/dev/graphics/fb0", strerror( errno ) );
+    return;
+  }
+
+  // Get fixed screen information 
+  if( -1 == xioctl( fd, FBIOGET_FSCREENINFO, &fInfo ) ) 
+  { 
+    printf("Error reading fixed information.\n"); 
+  }
+
+  // Get variable screen information. 
+  if( -1 == xioctl( fd, FBIOGET_VSCREENINFO, &vInfo ) ) 
+  { 
+    fprintf( stderr, "Error reading variable information.\n" ); 
+  } 
+  scrSize = vInfo.xres_virtual * vInfo.yres_virtual * vInfo.bits_per_pixel / 8;
+  fprintf( stderr, "Visible res:    %dx%d\n", vInfo.xres, vInfo.yres );
+  fprintf( stderr, "Virtual res:    %dx%d\n", vInfo.xres_virtual, vInfo.yres_virtual );
+  fprintf( stderr, "Offset  res:    %dx%d\n", vInfo.xoffset, vInfo.yoffset );
+  fprintf( stderr, "Bits per pixel: %d\n", vInfo.bits_per_pixel );
+  fprintf( stderr, "Red:   %d(%d)\n", vInfo.red.offset, vInfo.red.length );
+  fprintf( stderr, "Green: %d(%d)\n", vInfo.green.offset, vInfo.green.length );
+  fprintf( stderr, "Blue:  %d(%d)\n", vInfo.blue.offset, vInfo.blue.length );
+  fprintf( stderr, "Alpha: %d(%d)\n", vInfo.transp.offset, vInfo.transp.length );
+
+  // Map frame buffer device to memory.
+  pFbBuf = ( unsigned char * )mmap( NULL, scrSize, PROT_READ, MAP_SHARED , fd, 0 ); 
+  if( (int)pFbBuf == -1 ) 
+  { 
+    fprintf( stderr, "Error: failed to map framebuffer device to memory.\n" ); 
+  }
+}
+
+void closeFbDevice(void)
+{
+  munmap( pFbBuf, scrSize );
+  close(fd);
+}
+
+
+bool setupFbTexSurface(EGLDisplay dpy, EGLContext context) 
+{
+  fbTexBuffer = new GraphicBuffer( fbTexWidth, 
+                                   fbTexHeight, 
+                                   fbTexFormat,
+                                   fbTexUsage);
+  openFbDevice();
+  fillFbTexture(dpy, context, true);
+
+  return true;
 }
 
 #define FBO_WIDTH    256
@@ -482,16 +542,16 @@ void renderFrame(int w, int h)
 
   /* Ensure the correct texture is bound to texture unit 0. */
   glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, yuvTex);
+  glBindTexture(GL_TEXTURE_2D, fbTex);
 
   /* And draw the cube. */
   glDrawElements(GL_TRIANGLE_STRIP, sizeof(cubeIndices) / sizeof(GLubyte), GL_UNSIGNED_BYTE, cubeIndices);
   checkGlError("glDrawElements");
 
   /* Update cube's rotation angles for animating. */
-  angleX += 3;
-  angleY += 2;
-  angleZ += 1;
+  angleX += 0.15;
+  angleY += 0.1;
+  angleZ += 0.05;
 
   if(angleX >= 360) angleX -= 360;
   if(angleY >= 360) angleY -= 360;
@@ -629,7 +689,7 @@ int main(int argc, char** argv)
   printGLString("Renderer",   GL_RENDERER);
   printGLString("Extensions", GL_EXTENSIONS);
 
-  if(!setupYuvTexSurface(dpy, context)) 
+  if(!setupFbTexSurface(dpy, context)) 
   {
     fprintf(stderr, "Could not set up texture surface.\n");
     return 1;
@@ -646,6 +706,7 @@ int main(int argc, char** argv)
     renderFrame(w, h);
     eglSwapBuffers(dpy, surface);
     checkEglError("eglSwapBuffers");
+    fillFbTexture(dpy, context, false);
   }
   return 0;
 }
