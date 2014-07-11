@@ -482,7 +482,7 @@ void renderFrame(int w, int h)
 
   /* Ensure the correct texture is bound to texture unit 0. */
   glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, iFBOTex);
+  glBindTexture(GL_TEXTURE_2D, yuvTex);
 
   /* And draw the cube. */
   glDrawElements(GL_TRIANGLE_STRIP, sizeof(cubeIndices) / sizeof(GLubyte), GL_UNSIGNED_BYTE, cubeIndices);
